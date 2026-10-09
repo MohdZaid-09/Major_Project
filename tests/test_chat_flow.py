@@ -59,15 +59,16 @@ async def test_slow_retrieval_does_not_block_event_loop(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_async_provider_calls(monkeypatch):
-    create = AsyncMock(return_value=SimpleNamespace(content=[SimpleNamespace(type='text',text='{"conversational_reply":"ok"}')]))
+    create = AsyncMock(return_value=SimpleNamespace(content=[SimpleNamespace(type='text',text=json.dumps(follow_up()))]))
     monkeypatch.setattr(llm,'_get_anthropic_client',lambda:SimpleNamespace(messages=SimpleNamespace(create=create)))
     assert (await llm._chat_anthropic('hello','hi','',[]))['conversational_reply']=='ok'
     create.assert_awaited_once()
-    generate = AsyncMock(return_value=SimpleNamespace(text='{"conversational_reply":"ok"}'))
+    generate = AsyncMock(return_value=SimpleNamespace(text=json.dumps(follow_up())))
     monkeypatch.setattr(llm,'_get_gemini_client',lambda:SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate))))
     await llm._chat_gemini('hello','hi','',[])
     generate.assert_awaited_once()
     assert generate.call_args.kwargs['config']['response_mime_type']=='application/json'
+    assert 'max_output_tokens' not in generate.call_args.kwargs['config']
 
 
 @pytest.mark.asyncio
@@ -131,3 +132,58 @@ async def test_transcription_cleans_up_on_failure(monkeypatch,tmp_path):
     with pytest.raises(RuntimeError):
         await speech.transcribe_audio(UploadFile(filename='../../untrusted.wav',file=BytesIO(b'audio')))
     assert not list(tmp_path.iterdir())
+
+
+def follow_up():
+    return {"conversational_reply": "ok", "is_emergency": False,
+            **{key: None for key in llm.CARE_SYSTEMS}}
+
+
+def complete_guidance():
+    return {"conversational_reply": "Here are the four perspectives.", "is_emergency": False,
+            **{key: {"summary": "Information", "evidence_level": "limited", "precautions": "Seek advice if worsening"}
+               for key in llm.CARE_SYSTEMS}}
+
+
+@pytest.mark.parametrize("raw", [
+    '{"conversational_reply":"Here is guidance", "allopathic":',
+    'Just a single plain-text output',
+    json.dumps({"conversational_reply": "ok", "is_emergency": False}),
+    json.dumps({**follow_up(), "allopathic": {"summary": "Only one card"}}),
+])
+def test_incomplete_responses_are_not_silently_flattened(raw):
+    with pytest.raises(llm.InvalidLLMResponseError):
+        llm._parse_response(raw)
+
+
+def test_complete_guidance_and_clarification_are_preserved():
+    for payload in (follow_up(), complete_guidance()):
+        assert llm._parse_response(json.dumps(payload)) == payload
+        assert llm._parse_response('```json\n'+json.dumps(payload)+'\n```') == payload
+
+
+@pytest.mark.asyncio
+async def test_invalid_response_retried_once_then_four_perspectives_returned(monkeypatch):
+    monkeypatch.setattr(settings, 'LLM_PROVIDER', 'ollama')
+    monkeypatch.setattr(llm, 'retrieve_context_with_sources', lambda _: {'context':'','sources':[]})
+    provider=AsyncMock(side_effect=[llm.InvalidLLMResponseError('truncated'), complete_guidance()])
+    monkeypatch.setattr(llm, '_chat_ollama', provider)
+    result=await llm.chat_completion('symptom details','hi',[])
+    assert provider.await_count == 2
+    assert all(isinstance(result[key],dict) for key in llm.CARE_SYSTEMS)
+    assert provider.call_args_list[0] == provider.call_args_list[1]
+    provider.reset_mock(side_effect=True)
+    provider.side_effect=llm.InvalidLLMResponseError('still invalid')
+    with pytest.raises(llm.InvalidLLMResponseError):
+        await llm.chat_completion('symptom details')
+    assert provider.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_ollama_preserves_default_generation_budget(monkeypatch):
+    response=SimpleNamespace(raise_for_status=lambda:None,json=lambda:{'message':{'content':json.dumps(complete_guidance())}})
+    client=SimpleNamespace(is_closed=False,post=AsyncMock(return_value=response))
+    monkeypatch.setattr(llm,'_http_client',client)
+    result=await llm._chat_ollama('details','en','',[])
+    assert all(result[key] for key in llm.CARE_SYSTEMS)
+    assert 'options' not in client.post.call_args.kwargs['json']

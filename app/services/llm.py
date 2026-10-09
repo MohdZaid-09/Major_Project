@@ -26,9 +26,8 @@ CRITICAL RULES:
 6. Never recommend prescription-only medication without telling the user to consult a clinician first.
 7. You may be given REFERENCE MATERIAL retrieved from a curated knowledge base before the user's message. Use it to ground your answer when relevant and consistent with the rules above. If the reference material doesn't cover the user's specific situation, or conflicts with safety rules 1-6, rely on your own general knowledge instead - the reference material is a helpful aid, not an override of your safety judgment.
 
-8. Keep conversational_reply to 1-2 short sentences and each summary/precaution concise. Never omit urgent-care instructions for brevity.
-9. Do not present the four perspectives as equally effective. If reliable evidence is absent, say so instead of inventing a remedy. Homeopathy must never replace effective care. Do not recommend herbal/mineral formulations without qualified supervision.
-10. For an emergency, give immediate help-seeking instructions and leave all four remedy fields null.
+8. Do not present the four perspectives as equally effective. If reliable evidence is absent, say so instead of inventing a remedy. Homeopathy must never replace effective care. Do not recommend herbal/mineral formulations without qualified supervision.
+9. For an emergency, give immediate help-seeking instructions and leave all four remedy fields null.
 
 Respond ONLY with valid JSON, nothing else, in exactly this shape:
 {
@@ -58,28 +57,44 @@ def _get_gemini_client():
     return _gemini_client
 
 
+class InvalidLLMResponseError(RuntimeError):
+    """The model did not return the complete chat response contract."""
+
+
+CARE_SYSTEMS = ("allopathic", "ayurvedic", "unani", "homeopathic")
+
+
 def _parse_response(raw_text: str) -> dict:
+    # Never expose malformed/truncated JSON as a successful plain-text answer.
+    if not isinstance(raw_text, str) or not raw_text.strip():
+        raise InvalidLLMResponseError("Empty model response")
+    cleaned = raw_text.strip()
+    if cleaned.startswith("```") and cleaned.endswith("```"):
+        cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
     try:
-        parsed = json.loads(raw_text)
-    except json.JSONDecodeError:
-        cleaned = raw_text.strip().strip("`").replace("json\n", "", 1)
-        try:
-            parsed = json.loads(cleaned)
-        except json.JSONDecodeError:
-            parsed = {
-                "conversational_reply": raw_text,
-                "is_emergency": False,
-                "allopathic": None,
-                "ayurvedic": None,
-                "unani": None,
-                "homeopathic": None,
-            }
-    if not isinstance(parsed, dict):
-        parsed = {}
-    parsed.setdefault("conversational_reply", "I could not prepare a response. Please try again.")
-    parsed.setdefault("is_emergency", False)
-    for system in ("allopathic", "ayurvedic", "unani", "homeopathic"):
-        parsed.setdefault(system, None)
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise InvalidLLMResponseError("Incomplete or invalid model JSON") from exc
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("is_emergency"), bool):
+        raise InvalidLLMResponseError("Missing response object or emergency flag")
+    if parsed["is_emergency"]:
+        # chat_completion replaces this with the localized emergency response.
+        return parsed
+    if not isinstance(parsed.get("conversational_reply"), str) or not parsed["conversational_reply"].strip():
+        raise InvalidLLMResponseError("Missing conversational reply")
+    if any(key not in parsed for key in CARE_SYSTEMS):
+        raise InvalidLLMResponseError("Missing care perspective fields")
+    cards = [parsed[key] for key in CARE_SYSTEMS]
+    if all(card is None for card in cards):
+        return parsed  # A clarifying question legitimately has no care cards.
+    for card in cards:
+        if not isinstance(card, dict) or any(
+            not isinstance(card.get(field), str) or not card[field].strip()
+            for field in ("summary", "evidence_level", "precautions")
+        ):
+            raise InvalidLLMResponseError("Incomplete four-perspective guidance")
+        if card["evidence_level"] not in {"strong", "moderate", "limited", "traditional/anecdotal"}:
+            raise InvalidLLMResponseError("Invalid evidence label")
     return parsed
 
 
@@ -121,7 +136,7 @@ async def _chat_gemini(message: str, language: str, context: str, history: list[
     response = await client.aio.models.generate_content(
         model=settings.GEMINI_MODEL,
         contents=user_content,
-        config={"system_instruction": SYSTEM_PROMPT, "response_mime_type": "application/json", "max_output_tokens": settings.LLM_MAX_TOKENS},
+        config={"system_instruction": SYSTEM_PROMPT, "response_mime_type": "application/json"},
     )
     return _parse_response(response.text)
 
@@ -138,7 +153,6 @@ async def _chat_ollama(message: str, language: str, context: str, history: list[
         "stream": False,
         "format": "json",
         "keep_alive": settings.OLLAMA_KEEP_ALIVE,
-        "options": {"num_predict": settings.LLM_MAX_TOKENS},
     }
     global _http_client
     if _http_client is None or _http_client.is_closed:
@@ -166,12 +180,21 @@ async def chat_completion(message: str, language: str = "en", history: list[dict
     context = retrieval["context"]
     history = history or []
 
-    if settings.LLM_PROVIDER == "ollama":
-        result = await _chat_ollama(message, language, context, history)
-    elif settings.LLM_PROVIDER == "gemini":
-        result = await _chat_gemini(message, language, context, history)
-    else:
-        result = await _chat_anthropic(message, language, context, history)
+    provider = {
+        "ollama": _chat_ollama,
+        "gemini": _chat_gemini,
+        "anthropic": _chat_anthropic,
+    }.get(settings.LLM_PROVIDER, _chat_anthropic)
+    for attempt in range(2):
+        try:
+            result = await provider(message, language, context, history)
+            break
+        except InvalidLLMResponseError:
+            if attempt:
+                raise
+            # Retry once without inventing missing medical advice or changing
+            # the user's message/history. No extra call for valid responses.
+            logger.warning("Invalid structured model response; retrying once")
 
     if not isinstance(result, dict):
         raise RuntimeError("The configured LLM returned an invalid response object")

@@ -79,7 +79,8 @@ async def test_locales_chat_recording_and_mobile(tmp_path):
             await route.fulfill(json={
                 'transcribed_text':'A spoken question','detected_language':'en','language':'ur',
                 'conversational_reply':'آپ کی علامات کب شروع ہوئیں؟','is_emergency':False,
-                'allopathic':{'summary':'طبی مشورہ','precautions':'احتیاط','evidence_level':'strong'},
+                **{key:{'summary':'طبی مشورہ','precautions':'احتیاط','evidence_level':'strong'}
+                   for key in ('allopathic','ayurvedic','unani','homeopathic')},
                 'sources':[{'source_url':'https://www.nhs.uk/conditions/dehydration/'}],
             })
         await page.route('**/voice-chat',respond_voice)
@@ -92,12 +93,13 @@ async def test_locales_chat_recording_and_mobile(tmp_path):
         assert b'name="language"\r\n\r\nur' in voice[0]
         assert await page.is_visible('.mic-icon')
         assert await page.locator('#sources a').count()==1
-        assert 'مضبوط' in await page.inner_text('.evidence')
+        assert await page.locator('.remedy-card').count()==4
+        assert 'مضبوط' in await page.locator('.evidence').first.inner_text()
         await page.evaluate('document.fonts.ready')
         await page.screenshot(path=str(tmp_path / 'urdu-mobile.png'),full_page=True)
         await page.screenshot(path='/tmp/swasthai-urdu-mobile.png',full_page=True)
         await page.select_option('#language','en')
-        assert 'Modern medicine' in await page.inner_text('.remedy-card h4')
+        assert 'Modern medicine' in await page.locator('.remedy-card h4').first.inner_text()
         await page.set_viewport_size({'width':1280,'height':900})
         await page.click('#new-question')
         await page.screenshot(path='/tmp/swasthai-desktop.png',full_page=True)

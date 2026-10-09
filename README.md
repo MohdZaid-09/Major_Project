@@ -254,9 +254,12 @@ Mohd Zaid
   startup slower but avoids that cold-start work on the first chat. Set
   `WARMUP_SPEECH=true` to also load Whisper at startup (requires faster-whisper).
   Model downloads still need network access on first use.
-- Answers are prompted to be concise while retaining safety instructions.
-  `LLM_MAX_TOKENS=1500` is a configurable output ceiling, not a speed guarantee;
-  do not set it so low that multilingual JSON is truncated.
+- The original answer-length behavior is retained. `LLM_MAX_TOKENS=1500`
+  applies only to Anthropic, matching its original default. Gemini and Ollama
+  use their own default output limits. Invalid or incomplete JSON is retried once
+  and then reported as an error; it is never shown as a successful single reply.
+  Valid guidance contains all four care perspectives; clarifying questions
+  legitimately leave all four fields null.
   `LLM_TIMEOUT_SECONDS=90` bounds each provider request. Anthropic permits one retry.
 - INFO logs report retrieval and generation milliseconds without logging symptom
   text. Actual response time depends on the configured model, hardware and network;
