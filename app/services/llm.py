@@ -1,13 +1,16 @@
 import json
+import logging
+import time
+from starlette.concurrency import run_in_threadpool
 import httpx
-from anthropic import Anthropic
-from google import genai
 from app.config import settings
 from app.services.rag import retrieve_context_with_sources
 from app.services.safety import emergency_response, is_emergency_message
 
 _anthropic_client = None
 _gemini_client = None
+_http_client = None
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are SwasthAI, a multilingual AI healthcare assistant for users in India.
 
@@ -22,6 +25,10 @@ CRITICAL RULES:
    - precautions: brief safety notes or when to stop and see a doctor
 6. Never recommend prescription-only medication without telling the user to consult a clinician first.
 7. You may be given REFERENCE MATERIAL retrieved from a curated knowledge base before the user's message. Use it to ground your answer when relevant and consistent with the rules above. If the reference material doesn't cover the user's specific situation, or conflicts with safety rules 1-6, rely on your own general knowledge instead - the reference material is a helpful aid, not an override of your safety judgment.
+
+8. Keep conversational_reply to 1-2 short sentences and each summary/precaution concise. Never omit urgent-care instructions for brevity.
+9. Do not present the four perspectives as equally effective. If reliable evidence is absent, say so instead of inventing a remedy. Homeopathy must never replace effective care. Do not recommend herbal/mineral formulations without qualified supervision.
+10. For an emergency, give immediate help-seeking instructions and leave all four remedy fields null.
 
 Respond ONLY with valid JSON, nothing else, in exactly this shape:
 {
@@ -38,14 +45,16 @@ Respond ONLY with valid JSON, nothing else, in exactly this shape:
 def _get_anthropic_client():
     global _anthropic_client
     if _anthropic_client is None:
-        _anthropic_client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        from anthropic import AsyncAnthropic
+        _anthropic_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=settings.LLM_TIMEOUT_SECONDS, max_retries=1)
     return _anthropic_client
 
 
 def _get_gemini_client():
     global _gemini_client
     if _gemini_client is None:
-        _gemini_client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        from google import genai
+        _gemini_client = genai.Client(api_key=settings.GEMINI_API_KEY, http_options={"timeout": int(settings.LLM_TIMEOUT_SECONDS * 1000)})
     return _gemini_client
 
 
@@ -96,9 +105,9 @@ def _build_user_content(message: str, language: str, context: str, history: list
 async def _chat_anthropic(message: str, language: str, context: str, history: list[dict]) -> dict:
     client = _get_anthropic_client()
     user_content = _build_user_content(message, language, context, history)
-    response = client.messages.create(
+    response = await client.messages.create(
         model=settings.CLAUDE_MODEL,
-        max_tokens=1500,
+        max_tokens=settings.LLM_MAX_TOKENS,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_content}],
     )
@@ -109,10 +118,10 @@ async def _chat_anthropic(message: str, language: str, context: str, history: li
 async def _chat_gemini(message: str, language: str, context: str, history: list[dict]) -> dict:
     client = _get_gemini_client()
     user_content = _build_user_content(message, language, context, history)
-    response = client.models.generate_content(
+    response = await client.aio.models.generate_content(
         model=settings.GEMINI_MODEL,
         contents=user_content,
-        config={"system_instruction": SYSTEM_PROMPT},
+        config={"system_instruction": SYSTEM_PROMPT, "response_mime_type": "application/json", "max_output_tokens": settings.LLM_MAX_TOKENS},
     )
     return _parse_response(response.text)
 
@@ -128,13 +137,16 @@ async def _chat_ollama(message: str, language: str, context: str, history: list[
         ],
         "stream": False,
         "format": "json",
+        "keep_alive": settings.OLLAMA_KEEP_ALIVE,
+        "options": {"num_predict": settings.LLM_MAX_TOKENS},
     }
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        response = await client.post(url, json=payload)
-        response.raise_for_status()
-        data = response.json()
-        raw_text = data.get("message", {}).get("content", "")
-        return _parse_response(raw_text)
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(timeout=settings.LLM_TIMEOUT_SECONDS)
+    response = await _http_client.post(url, json=payload)
+    response.raise_for_status()
+    data = response.json()
+    return _parse_response(data.get("message", {}).get("content", ""))
 
 
 async def chat_completion(message: str, language: str = "en", history: list[dict] | None = None) -> dict:
@@ -148,7 +160,9 @@ async def chat_completion(message: str, language: str = "en", history: list[dict
         result["sources"] = []
         return result
 
-    retrieval = retrieve_context_with_sources(message)
+    started = time.perf_counter()
+    retrieval = await run_in_threadpool(retrieve_context_with_sources, message)
+    retrieved_at = time.perf_counter()
     context = retrieval["context"]
     history = history or []
 
@@ -161,6 +175,25 @@ async def chat_completion(message: str, language: str = "en", history: list[dict
 
     if not isinstance(result, dict):
         raise RuntimeError("The configured LLM returned an invalid response object")
+    if result.get("is_emergency") is True:
+        result = emergency_response(language)
+    logger.info("Chat timing provider=%s retrieval_ms=%.0f generation_ms=%.0f",
+                settings.LLM_PROVIDER, (retrieved_at - started) * 1000,
+                (time.perf_counter() - retrieved_at) * 1000)
     result["language"] = language
     result["sources"] = retrieval["sources"]
     return result
+
+async def close_clients():
+    """Release reusable provider connections on application shutdown."""
+    global _anthropic_client, _gemini_client, _http_client
+    if _anthropic_client is not None:
+        await _anthropic_client.close()
+        _anthropic_client = None
+    if _gemini_client is not None:
+        await _gemini_client.aio.aclose()
+        await run_in_threadpool(_gemini_client.close)
+        _gemini_client = None
+    if _http_client is not None:
+        await _http_client.aclose()
+        _http_client = None
