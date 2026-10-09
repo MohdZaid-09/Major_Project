@@ -1,0 +1,15 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.vscode/
+audio_temp/
+chroma_store/
+*.sqlite3
+*.log
+.DS_Store
+project_progress_comparison.pdf

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f3eb">
+  <title>SwasthAI | Health assistant</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20260911-2">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Conversation navigation">
+      <a class="brand" href="/" aria-label="SwasthAI home"><span class="brand-mark" aria-hidden="true">+</span><span>SwasthAI</span></a>
+      <button id="new-question" class="new-chat-button" type="button"><span aria-hidden="true">+</span><span>New chat</span></button>
+      <div class="recent-chats">
+        <p class="sidebar-label">Recent chats</p>
+        <nav id="chat-list" class="chat-list" aria-label="Recent chats"></nav>
+      </div>
+      <div class="sidebar-note"><strong>Health guidance</strong><span>Simple answers for everyday concerns.</span></div>
+      <div class="sidebar-footer"><span class="status-dot" aria-hidden="true"></span><span>Assistant ready</span></div>
+    </aside>
+
+    <main class="workspace">
+      <header class="workspace-header">
+        <div><p class="eyebrow">Private health conversation</p><h1>Health assistant</h1></div>
+        <div class="language-control"><label for="language">Language</label><select id="language" name="language">
+          <option value="en">English</option><option value="hi">Hindi</option><option value="bn">Bengali</option><option value="ta">Tamil</option><option value="te">Telugu</option><option value="mr">Marathi</option><option value="gu">Gujarati</option><option value="kn">Kannada</option><option value="ml">Malayalam</option><option value="pa">Punjabi</option><option value="ur">Urdu</option>
+        </select></div>
+      </header>
+
+      <div class="conversation-area">
+        <section id="welcome" class="welcome" aria-labelledby="page-title">
+          <div class="welcome-icon" aria-hidden="true">+</div>
+          <h2 id="page-title">How are you feeling today?</h2>
+          <p>Describe what is troubling you. I can ask a few questions before sharing four care perspectives.</p>
+        </section>
+
+        <section id="result-section" class="result-section" aria-live="polite" hidden>
+          <div id="emergency-banner" class="emergency-banner" hidden><strong>Please get medical help now</strong><span>Call your local emergency number or ask someone nearby to help you reach a hospital.</span></div>
+          <div id="chat-thread" class="chat-thread" aria-live="polite"></div>
+          <audio id="reply-audio" controls hidden></audio>
+          <div id="remedies" class="remedies" hidden>
+            <div class="section-heading"><div><p class="eyebrow">Final guidance</p><h2>Four care perspectives</h2></div><span class="verdict-badge">Complete view</span></div>
+            <div id="remedy-grid" class="remedy-grid"></div>
+          </div>
+        </section>
+      </div>
+
+      <div class="composer-dock">
+        <div id="record-status" class="status" role="status">You can type a question or use the microphone.</div>
+        <form id="chat-form" class="chat-form">
+          <label id="composer-label" class="sr-only" for="message">What would you like help with?</label>
+          <textarea id="message" name="message" rows="1" placeholder="Message SwasthAI..." required></textarea>
+          <div class="composer-actions">
+            <button id="record-button" class="icon-button microphone-button" type="button" aria-pressed="false" title="Speak your question"><span class="mic-icon" aria-hidden="true">&#9679;</span><span id="record-label" class="sr-only">Press to speak</span></button>
+            <button class="send-button" type="submit" title="Send message"><span id="send-label" class="sr-only">Send message</span><span aria-hidden="true">&#8593;</span></button>
+          </div>
+        </form>
+        <p class="privacy-note">General information only. This assistant does not replace a doctor.</p>
+      </div>
+      <p id="error-message" class="error-message" role="alert" hidden></p>
+    </main>
+  </div>
+  <script src="/static/app.js?v=20260911-2"></script>
+</body>
+</html>
