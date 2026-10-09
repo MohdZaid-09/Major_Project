@@ -1,5 +1,7 @@
 import json
 import logging
+from contextlib import asynccontextmanager
+from starlette.concurrency import run_in_threadpool
 
 from fastapi.staticfiles import StaticFiles
 from app.config import settings
@@ -7,12 +9,26 @@ from app.config import settings
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
-from app.services.llm import chat_completion
+from app.services.llm import chat_completion, close_clients
+from app.services.rag import warmup_retrieval
+from app.services.speech import get_model
 from app.services.speech import transcribe_audio
 from app.services.tts import synthesize_speech
-from app.config import settings
 
-app = FastAPI(title="Voice AI Backend MVP", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app):
+    if settings.WARMUP_RAG:
+        await run_in_threadpool(warmup_retrieval)
+    if settings.WARMUP_SPEECH:
+        try:
+            await run_in_threadpool(get_model)
+        except Exception:
+            logging.getLogger(__name__).warning("Speech warmup unavailable", exc_info=True)
+    yield
+    await close_clients()
+
+
+app = FastAPI(title="SwasthAI", version="0.2.0", lifespan=lifespan)
 logger = logging.getLogger(__name__)
 app.mount("/audio", StaticFiles(directory=settings.AUDIO_TEMP_DIR), name="audio")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
@@ -72,14 +88,15 @@ async def chat(
 
 
 @app.post("/speak")
-async def speak(text: str = Form(...)) -> JSONResponse:
-    result = await synthesize_speech(text)
+async def speak(text: str = Form(...), language: str = Form("en")) -> JSONResponse:
+    result = await synthesize_speech(text, language)
     return JSONResponse(content=result)
 
 @app.post("/voice-chat")
 async def voice_chat(
     file: UploadFile = File(...),
     context: str = Form(""),
+    language: str = Form(""),
     history: str = Form("[]"),
 ) -> JSONResponse:
     try:
@@ -103,7 +120,7 @@ async def voice_chat(
     try:
         parsed_history = _parse_history(history)
         prompt = user_text if parsed_history or not context else f"{context}\nUser: {user_text}"
-        result = await chat_completion(prompt, language=detected_language, history=parsed_history)
+        result = await chat_completion(prompt, language=language or detected_language, history=parsed_history)
     except (json.JSONDecodeError, ValueError):
         return JSONResponse(status_code=400, content={"error": "Conversation history was invalid."})
     except Exception:

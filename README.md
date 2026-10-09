@@ -229,3 +229,72 @@ This project is available for educational and personal use.
 ## Author
 
 Mohd Zaid
+
+## Knowledge, latency and interface update
+
+- The corpus now has **13 symptom topics** (the original four plus diarrhoea/vomiting,
+  dehydration, constipation, reflux, sore throat, nasal allergies, heat illness,
+  sprains/strains and insect bites), plus a complementary-care safety document.
+- New material includes source URLs and editorial review dates. Summaries are
+  general information, **not clinician-reviewed**. The original four documents
+  remain legacy material without verified source metadata. Source links appear
+  below care cards when available; retrieved sources are not a guarantee that
+  every generated sentence is supported by them.
+- Rebuild the index after updating, then restart the server:
+
+  ```bash
+  python scripts/ingest_knowledge_base.py
+  uvicorn app.main:app --reload
+  ```
+
+- Provider requests use async SDKs. Embedding/retrieval, transcription (including
+  lazy segment iteration) and gTTS run off the request event loop. Ollama reuses
+  HTTP connections and keeps its model loaded for `OLLAMA_KEEP_ALIVE=15m`.
+- `WARMUP_RAG=true` moves the first embedding/model load into startup. This makes
+  startup slower but avoids that cold-start work on the first chat. Set
+  `WARMUP_SPEECH=true` to also load Whisper at startup (requires faster-whisper).
+  Model downloads still need network access on first use.
+- The original answer-length behavior is retained. `LLM_MAX_TOKENS=1500`
+  applies only to Anthropic, matching its original default. Gemini and Ollama
+  use their own default output limits. Invalid or incomplete JSON is retried once
+  and then reported as an error; it is never shown as a successful single reply.
+  Valid guidance contains all four care perspectives; clarifying questions
+  legitimately leave all four fields null.
+  `LLM_TIMEOUT_SECONDS=90` bounds each provider request. Anthropic permits one retry.
+- INFO logs report retrieval and generation milliseconds without logging symptom
+  text. Actual response time depends on the configured model, hardware and network;
+  no live provider speedup has been measured in this update.
+- All 11 language choices translate app-owned interface text immediately, including
+  statuses, errors, care labels and accessibility labels. Urdu uses RTL layout.
+  Language choice persists locally. Existing conversation text and generated care
+  content retain their original language; future requests use the selected language.
+  Noto fonts are bundled for Indian scripts and Urdu with their SIL Open Font
+  Licenses in `app/static/fonts/`. Language names stay in their own scripts. Browser-native audio controls follow
+  the browser's locale. Translations should receive native-speaker review.
+- Voice chat accepts an optional `language` form field: when supplied it controls
+  the response language; otherwise detected speech language is used. `/speak`
+  accepts `language` too. Browser speech voices depend on the device.
+- The microphone uses an SVG icon and changes to a stop symbol during capture.
+  Duplicate submission and switching chats while requests are active are blocked.
+  Failed text requests restore the draft for retry. Enter sends; Shift+Enter adds a line.
+
+### Verification
+
+```bash
+pip install pytest pytest-asyncio
+python -m pytest tests/test_chat_flow.py -q
+```
+
+The regression suite uses mocked providers/retrieval: no credentials or model
+weights are required. Browser checks additionally require Playwright:
+
+```bash
+pip install playwright
+playwright install chromium
+# With the app running on port 8765, set SWASTHAI_TEST_URL=http://127.0.0.1:8765
+python -m pytest tests/test_ui.py -q
+```
+
+The deterministic emergency keyword gate still covers English phrases only.
+Emergency replies are localized in all UI languages; multilingual symptom
+recognition still depends on the model and needs a separate clinical safety review.

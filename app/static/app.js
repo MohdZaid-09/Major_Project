@@ -1,368 +1,267 @@
-const recordButton = document.querySelector('#record-button');
-const recordLabel = document.querySelector('#record-label');
-const recordStatus = document.querySelector('#record-status');
-const chatForm = document.querySelector('#chat-form');
-const messageInput = document.querySelector('#message');
-const welcome = document.querySelector('#welcome');
-const composerLabel = document.querySelector('#composer-label');
-const sendLabel = document.querySelector('#send-label');
-const languageSelect = document.querySelector('#language');
-const resultSection = document.querySelector('#result-section');
-const chatThread = document.querySelector('#chat-thread');
-const replyAudio = document.querySelector('#reply-audio');
-const remedies = document.querySelector('#remedies');
-const remedyGrid = document.querySelector('#remedy-grid');
-const emergencyBanner = document.querySelector('#emergency-banner');
-const errorMessage = document.querySelector('#error-message');
-const newQuestionButton = document.querySelector('#new-question');
-const chatList = document.querySelector('#chat-list');
-const STORAGE_KEY = 'swasthai-conversation';
+const $ = (selector) => document.querySelector(selector);
+const recordButton = $('#record-button');
+const recordLabel = $('#record-label');
+const recordStatus = $('#record-status');
+const chatForm = $('#chat-form');
+const messageInput = $('#message');
+const languageSelect = $('#language');
+const chatThread = $('#chat-thread');
+const replyAudio = $('#reply-audio');
+const remedies = $('#remedies');
+const emergencyBanner = $('#emergency-banner');
+const errorMessage = $('#error-message');
+const chatList = $('#chat-list');
 const CHATS_STORAGE_KEY = 'swasthai-chats';
-
+let locale = 'en';
+try { locale = localStorage.getItem('swasthai-language') || 'en'; } catch (_) {}
+if (!window.SWASTHAI_I18N[locale]) locale = 'en';
+let busy = false;
+let recording = false;
 let recorder;
-let chunks = [];
+let mediaStream;
 let busyTimer;
-let busyStartedAt;
+let busyStartedAt = 0;
+let statusKey = 'idle';
+let errorKey = '';
+let lastResult = null;
 let chats = loadChats();
 let activeChatId = chats[0]?.id || createChatId();
-let conversation = getActiveConversation();
+let conversation = chats[0]?.messages || [];
 
-function createChatId() {
-  return `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+function t(key) { return window.SWASTHAI_I18N[locale][key] || window.SWASTHAI_I18N.en[key] || key; }
+function createChatId() { return `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`; }
+function escapeHtml(value) {
+  return String(value || '').replace(/[&<>'"]/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;'}[c]));
 }
-
 function loadChats() {
   try {
-    const savedChats = JSON.parse(window.localStorage.getItem(CHATS_STORAGE_KEY) || 'null');
-    if (Array.isArray(savedChats)) {
-      return savedChats.filter((chat) => chat && chat.id && Array.isArray(chat.messages));
-    }
-
-    const legacyMessages = JSON.parse(window.localStorage.getItem(STORAGE_KEY) || '[]');
-    if (Array.isArray(legacyMessages) && legacyMessages.length) {
-      const migratedChat = {
-        id: createChatId(),
-        title: getChatTitle(legacyMessages),
-        messages: legacyMessages,
-        updatedAt: Date.now()
-      };
-      window.localStorage.setItem(CHATS_STORAGE_KEY, JSON.stringify([migratedChat]));
-      return [migratedChat];
-    }
-  } catch (error) {
-    return [];
-  }
+    const saved = JSON.parse(localStorage.getItem(CHATS_STORAGE_KEY) || 'null');
+    if (Array.isArray(saved)) return saved.filter(c => c && typeof c.id === 'string' && Array.isArray(c.messages));
+    const legacy = JSON.parse(localStorage.getItem('swasthai-conversation') || '[]');
+    if (Array.isArray(legacy) && legacy.length) return [{id:createChatId(), messages:legacy, updatedAt:Date.now()}];
+  } catch (_) {}
   return [];
 }
-
-function getActiveConversation() {
-  return chats.find((chat) => chat.id === activeChatId)?.messages || [];
-}
-
-function getChatTitle(messages) {
-  const firstUserMessage = messages.find((entry) => entry.role === 'user');
-  const title = firstUserMessage?.text?.trim() || 'New conversation';
-  return title.length > 35 ? `${title.slice(0, 35).trim()}...` : title;
-}
-
-function saveChats() {
-  try {
-    window.localStorage.setItem(CHATS_STORAGE_KEY, JSON.stringify(chats));
-    window.localStorage.removeItem(STORAGE_KEY);
-  } catch (error) {
-    // The in-memory archive still works when browser storage is unavailable.
-  }
-}
-
-function saveActiveChat() {
-  const existingChat = chats.find((chat) => chat.id === activeChatId);
-  if (conversation.length) {
-    const chat = existingChat || { id: activeChatId, title: getChatTitle(conversation), messages: [] };
-    chat.messages = conversation;
-    chat.title = getChatTitle(conversation);
-    chat.updatedAt = Date.now();
-    if (!existingChat) chats.unshift(chat);
-    chats.sort((first, second) => second.updatedAt - first.updatedAt);
-  } else if (existingChat) {
-    chats = chats.filter((chat) => chat.id !== activeChatId);
-  }
-  saveChats();
-  renderChatList();
-}
-
-function renderChatList() {
-  chatList.innerHTML = chats.map((chat) => `
-    <button class="chat-list-item${chat.id === activeChatId ? ' is-active' : ''}" type="button" data-chat-id="${escapeHtml(chat.id)}">
-      <span class="chat-list-icon" aria-hidden="true">•</span>
-      <span class="chat-list-title">${escapeHtml(chat.title)}</span>
-    </button>
-  `).join('');
-}
-
 function saveConversation() {
-  saveActiveChat();
-}
-
-function renderConversation() {
-  chatThread.innerHTML = '';
-  conversation.forEach((entry) => addChatMessage(entry.role, entry.text));
   if (conversation.length) {
-    welcome.hidden = true;
-    resultSection.hidden = false;
-    composerLabel.textContent = 'Reply to the assistant';
-    messageInput.placeholder = 'Continue the conversation...';
-    sendLabel.textContent = 'Send reply';
+    let chat = chats.find(c => c.id === activeChatId);
+    if (!chat) { chat = {id:activeChatId}; chats.unshift(chat); }
+    Object.assign(chat, {messages:conversation, updatedAt:Date.now()});
+    chats.sort((a,b) => b.updatedAt - a.updatedAt);
   }
-}
-
-function openChat(chatId) {
-  const selectedChat = chats.find((chat) => chat.id === chatId);
-  if (!selectedChat || selectedChat.id === activeChatId) return;
-  activeChatId = selectedChat.id;
-  conversation = selectedChat.messages;
-  renderConversation();
+  try {
+    localStorage.setItem(CHATS_STORAGE_KEY, JSON.stringify(chats));
+    localStorage.removeItem('swasthai-conversation');
+  } catch (_) {}
   renderChatList();
-  remedies.hidden = true;
-  emergencyBanner.hidden = true;
-  replyAudio.pause();
-  replyAudio.removeAttribute('src');
-  replyAudio.hidden = true;
-  resultSection.hidden = !conversation.length;
 }
-
-function setBusy(isBusy, text) {
-  recordButton.disabled = isBusy;
-  chatForm.querySelector('button').disabled = isBusy;
-  window.clearInterval(busyTimer);
-  if (!isBusy) {
-    if (text) recordStatus.textContent = text;
-    return;
-  }
-
-  busyStartedAt = Date.now();
-  recordStatus.textContent = `${text} 0 seconds elapsed.`;
-  busyTimer = window.setInterval(() => {
-    const seconds = Math.floor((Date.now() - busyStartedAt) / 1000);
-    recordStatus.textContent = `${text} ${seconds} seconds elapsed.`;
-  }, 1000);
+function renderChatList() {
+  chatList.innerHTML = chats.map(chat => {
+    const title = chat.messages.find(e => e.role === 'user')?.text || t('newChat');
+    return `<button class="chat-list-item${chat.id === activeChatId ? ' is-active' : ''}" type="button" data-chat-id="${escapeHtml(chat.id)}" ${busy || recording ? 'disabled' : ''}><span class="chat-list-icon" aria-hidden="true">•</span><span class="chat-list-title" dir="auto">${escapeHtml(title.slice(0,35))}</span></button>`;
+  }).join('');
 }
-
-function showError(message) {
-  errorMessage.textContent = message;
-  errorMessage.hidden = false;
+function updateStatus() {
+  recordStatus.textContent = t(statusKey) + (busy ? ` ${t('elapsed').replace('{seconds}', Math.floor((Date.now()-busyStartedAt)/1000))}` : '');
 }
-
-function clearError() {
-  errorMessage.hidden = true;
-  errorMessage.textContent = '';
+function applyLanguage() {
+  document.documentElement.lang = locale;
+  document.documentElement.dir = locale === 'ur' ? 'rtl' : 'ltr';
+  document.title = `SwasthAI | ${t('title')}`;
+  languageSelect.value = locale;
+  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
+  $('.sidebar').setAttribute('aria-label', t('recent'));
+  $('.brand').setAttribute('aria-label', `SwasthAI — ${t('title')}`);
+  chatList.setAttribute('aria-label', t('recent'));
+  $('#new-question').setAttribute('aria-label', t('newChat'));
+  languageSelect.setAttribute('aria-label', t('language'));
+  $('#composer-label').textContent = t(conversation.length ? 'reply' : 'composer');
+  messageInput.placeholder = t(conversation.length ? 'continue' : 'placeholder');
+  $('#send-label').textContent = t('send');
+  $('.send-button').title = t('send');
+  recordLabel.textContent = t(recording ? 'stop' : 'speak');
+  recordButton.title = t(recording ? 'stop' : 'speak');
+  recordButton.setAttribute('aria-label', recordButton.title);
+  replyAudio.setAttribute('aria-label', t('reply'));
+  if (errorKey) errorMessage.textContent = t(errorKey);
+  updateStatus();
+  renderChatList();
+  if (lastResult) renderRemedies(lastResult);
 }
-
+function updateControls() {
+  recordButton.disabled = busy;
+  recordButton.classList.toggle('is-recording', recording);
+  recordButton.setAttribute('aria-pressed', String(recording));
+  $('.send-button').disabled = busy || recording;
+  messageInput.disabled = busy || recording;
+  $('#new-question').disabled = busy || recording;
+  chatForm.setAttribute('aria-busy', String(busy));
+  applyLanguage();
+}
+function setBusy(value, key='idle') {
+  busy = value;
+  statusKey = key;
+  clearInterval(busyTimer);
+  if (busy) { busyStartedAt = Date.now(); busyTimer = setInterval(updateStatus,1000); }
+  updateControls();
+}
+function showError(key) { errorKey = key; errorMessage.textContent = t(key); errorMessage.hidden = false; }
+function clearError() { errorKey=''; errorMessage.hidden=true; errorMessage.textContent=''; }
+function addChatMessage(role,text) {
+  const p = document.createElement('p');
+  p.className = `chat-message ${role === 'user' ? 'user' : 'assistant'}`;
+  p.dir = 'auto';
+  p.textContent = text;
+  chatThread.append(p);
+}
+function renderConversation() {
+  chatThread.innerHTML='';
+  conversation.forEach(entry => addChatMessage(entry.role,entry.text));
+  $('#welcome').hidden = !!conversation.length;
+  $('#result-section').hidden = !conversation.length;
+  applyLanguage();
+}
 function renderRemedies(data) {
-  const labels = {
-    allopathic: 'Modern medicine',
-    ayurvedic: 'Ayurvedic care',
-    unani: 'Unani care',
-    homeopathic: 'Homeopathic view'
-  };
-  const entries = Object.entries(labels)
-    .filter(([key]) => data[key])
-    .map(([key, label]) => {
-      const remedy = data[key];
-      return `<article class="remedy-card">
-        <h4>${label}</h4>
-        <p>${escapeHtml(remedy.summary)}</p>
-        <p>${escapeHtml(remedy.precautions)}</p>
-        <span class="evidence">Evidence: ${escapeHtml(remedy.evidence_level)}</span>
-      </article>`;
-    });
-
-  remedyGrid.innerHTML = entries.join('');
-  remedies.hidden = entries.length < 4;
+  const evidenceKeys = {'strong':'strong','moderate':'moderate','limited':'limited','traditional/anecdotal':'traditional'};
+  const entries = ['allopathic','ayurvedic','unani','homeopathic'].filter(key => data[key] && typeof data[key] === 'object');
+  $('#remedy-grid').innerHTML = entries.map(key => {
+    const item = data[key];
+    return `<article class="remedy-card"><h4>${t(key)}</h4><p dir="auto">${escapeHtml(item.summary)}</p><p dir="auto">${escapeHtml(item.precautions)}</p><span class="evidence">${t('evidence')}: ${t(evidenceKeys[item.evidence_level] || 'limited')}</span></article>`;
+  }).join('');
+  remedies.hidden = !entries.length || data.is_emergency === true;
+  const sources = $('#sources');
+  sources.replaceChildren();
+  const urls = new Set();
+  for (const source of data.sources || []) {
+    try {
+      const url = new URL(source.source_url);
+      if (url.protocol !== 'https:' || urls.has(url.href)) continue;
+      urls.add(url.href);
+      const link = document.createElement('a');
+      link.href = url.href; link.target='_blank'; link.rel='noopener noreferrer';
+      link.textContent = `${t('sources')} ${urls.size} · ${url.hostname}`;
+      sources.append(link);
+    } catch (_) {}
+  }
+  sources.hidden = !urls.size;
 }
-
-function escapeHtml(value) {
-  return String(value || '').replace(/[&<>'"]/g, (character) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
-  }[character]));
-}
-
-function speakReply(text, language) {
-  if (!('speechSynthesis' in window) || !text) return;
-  window.speechSynthesis.cancel();
+function speakReply(text,language) {
+  if (!window.speechSynthesis || !text) return;
+  try {
+  speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = language || 'en';
+  utterance.lang = language || locale;
   utterance.rate = 0.9;
-  window.speechSynthesis.speak(utterance);
+  speechSynthesis.speak(utterance);
+  } catch (_) { /* A missing device voice must not discard the text answer. */ }
 }
-
-function addChatMessage(role, text) {
-  const message = document.createElement('p');
-  message.className = `chat-message ${role}`;
-  message.textContent = text;
-  chatThread.appendChild(message);
-  chatThread.scrollTop = chatThread.scrollHeight;
+async function readApiResponse(response) {
+  if (!response.ok) throw new Error('request failed');
+  const data = await response.json();
+  if (!data || typeof data !== 'object' || typeof data.conversational_reply !== 'string') throw new Error('invalid response');
+  return data;
 }
-
-async function readApiResponse(response, fallbackMessage) {
-  const contentType = response.headers.get('content-type') || '';
-  if (contentType.includes('application/json')) {
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.detail || data.error || fallbackMessage);
-    return data;
-  }
-
-  const body = await response.text();
-  if (!response.ok) {
-    throw new Error(`${fallbackMessage} (server error ${response.status})`);
-  }
-  throw new Error(body || fallbackMessage);
-}
-
 function renderResult(data) {
-  const reply = data.conversational_reply || 'I could not prepare a response. Please try again.';
-  welcome.hidden = true;
-  addChatMessage('assistant', reply);
-  conversation.push({ role: 'assistant', text: reply });
+  const reply = data.conversational_reply || t('errorResponse');
+  conversation.push({role:'assistant',text:reply});
   saveConversation();
+  lastResult = data;
+  renderConversation();
   emergencyBanner.hidden = !data.is_emergency;
   renderRemedies(data);
-  if (remedies.hidden) {
-    composerLabel.textContent = 'Reply to the assistant';
-    messageInput.placeholder = 'For example: The pain is mild and I have no vomiting';
-    sendLabel.textContent = 'Send reply';
-  }
-  if (data.audio_url) {
-    replyAudio.src = data.audio_url;
-    replyAudio.hidden = false;
-  } else {
-    replyAudio.removeAttribute('src');
-    replyAudio.hidden = true;
-  }
-  speakReply(data.conversational_reply, data.detected_language || data.language);
-  resultSection.hidden = false;
-  resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (data.audio_url) { replyAudio.src = data.audio_url; replyAudio.hidden=false; }
+  speakReply(reply,data.language || locale);
+  chatThread.lastElementChild?.scrollIntoView({behavior:'smooth',block:'nearest'});
 }
-
+function history() { return conversation.slice(-12).map(entry => ({role:entry.role,content:entry.text})); }
 async function submitChat(message) {
+  if (busy || recording) return;
   clearError();
-  addChatMessage('user', message);
-  const history = conversation.map((entry) => ({
-    role: entry.role,
-    content: entry.text
-  }));
-  conversation.push({ role: 'user', text: message });
+  const previousHistory = history();
+  const requestLanguage = locale;
+  conversation.push({role:'user',text:message});
   saveConversation();
-  setBusy(true, 'Preparing your answer. Please wait...');
-  const formData = new FormData();
-  formData.append('message', message);
-  formData.append('language', languageSelect.value);
-  formData.append('history', JSON.stringify(history));
-
+  renderConversation();
+  messageInput.value='';
+  resizeComposer();
+  setBusy(true,'preparing');
+  const form = new FormData();
+  form.append('message',message); form.append('language',requestLanguage); form.append('history',JSON.stringify(previousHistory));
   try {
-    const response = await fetch('/chat', { method: 'POST', body: formData });
-    const data = await readApiResponse(response, 'The assistant could not answer right now.');
-    renderResult(data);
-  } catch (error) {
-    showError(error.message);
-  } finally {
-    setBusy(false, 'You can speak for as long as you need.');
-  }
+    renderResult(await readApiResponse(await fetch('/chat',{method:'POST',body:form})));
+  } catch (_) {
+    // Roll back the unanswered turn so retrying does not duplicate history.
+    conversation.pop(); saveConversation(); renderConversation();
+    messageInput.value=message; resizeComposer(); showError('errorChat');
+  } finally { setBusy(false); messageInput.focus(); }
 }
-
-async function submitVoice(blob) {
-  clearError();
-  setBusy(true, 'Understanding your recording. Please wait...');
-  const formData = new FormData();
-  formData.append('file', blob, 'voice-question.webm');
-  formData.append('history', JSON.stringify(conversation.map((entry) => ({
-    role: entry.role,
-    content: entry.text
-  }))));
-
+async function submitVoice(blob, requestLanguage) {
+  clearError(); setBusy(true,'transcribing');
+  const form = new FormData();
+  form.append('file',blob,'voice-question.webm');
+  form.append('language',requestLanguage); form.append('history',JSON.stringify(history()));
   try {
-    const response = await fetch('/voice-chat', { method: 'POST', body: formData });
-    const data = await readApiResponse(response, 'I could not process the recording.');
-    const spokenText = data.transcribed_text || 'Voice question';
-    addChatMessage('user', spokenText);
-    conversation.push({ role: 'user', text: spokenText });
-    saveConversation();
+    const data = await readApiResponse(await fetch('/voice-chat',{method:'POST',body:form}));
+    conversation.push({role:'user',text:data.transcribed_text || t('voiceQuestion')});
     renderResult(data);
-  } catch (error) {
-    showError(error.message);
-  } finally {
-    setBusy(false, 'You can speak for as long as you need.');
-  }
+  } catch (_) { showError('errorVoice'); }
+  finally { setBusy(false); }
 }
-
-recordButton.addEventListener('click', async () => {
+recordButton.addEventListener('click',async () => {
+  if (busy) return;
   clearError();
-  if (recorder && recorder.state === 'recording') {
-    recorder.stop();
-    return;
-  }
-
-  if (!navigator.mediaDevices || !window.MediaRecorder) {
-    showError('Voice recording is not supported in this browser. Please type your question below.');
-    return;
-  }
-
+  if (recorder?.state === 'recording') { recorder.stop(); return; }
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) { showError('errorUnsupported'); return; }
+  // Lock while permission is pending, preventing concurrent capture sessions.
+  setBusy(true,'preparing');
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    chunks = [];
-    recorder = new MediaRecorder(stream);
-    recorder.addEventListener('dataavailable', (event) => chunks.push(event.data));
-    recorder.addEventListener('stop', () => {
-      stream.getTracks().forEach((track) => track.stop());
-      submitVoice(new Blob(chunks, { type: recorder.mimeType || 'audio/webm' }));
+    mediaStream = await navigator.mediaDevices.getUserMedia({audio:true});
+    recorder = new MediaRecorder(mediaStream);
+    const chunks=[];
+    const requestLanguage = locale;
+    recorder.addEventListener('dataavailable',e => { if(e.data.size) chunks.push(e.data); });
+    let failed = false;
+    recorder.addEventListener('error',() => {
+      failed=true; recording=false;
+      mediaStream.getTracks().forEach(track => track.stop());
+      setBusy(false); showError('errorVoice');
     });
-    recorder.start();
-    recordButton.classList.add('is-recording');
-    recordButton.setAttribute('aria-pressed', 'true');
-    recordLabel.textContent = 'Press to finish';
-    recordStatus.textContent = 'I am listening. Press the button when you are finished.';
-  } catch (error) {
-    showError('Microphone access was not available. Please type your question below.');
+    recorder.addEventListener('stop',() => {
+      mediaStream.getTracks().forEach(track => track.stop());
+      recording=false;
+      if (!failed) submitVoice(new Blob(chunks,{type:recorder.mimeType || 'audio/webm'}),requestLanguage);
+    });
+    recorder.start(); recording=true; setBusy(false,'listening');
+  } catch (_) {
+    mediaStream?.getTracks().forEach(track => track.stop());
+    recording=false; setBusy(false); showError('errorMic');
   }
 });
-
-chatForm.addEventListener('submit', (event) => {
-  event.preventDefault();
-  const message = messageInput.value.trim();
-  if (message) submitChat(message);
+function resizeComposer() { messageInput.style.height='auto'; messageInput.style.height=`${Math.min(messageInput.scrollHeight,140)}px`; }
+messageInput.addEventListener('input',resizeComposer);
+chatForm.addEventListener('submit',e => { e.preventDefault(); const text=messageInput.value.trim(); if(text) submitChat(text); });
+messageInput.addEventListener('keydown',e => {
+  if(e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); chatForm.requestSubmit(); }
 });
-
-newQuestionButton.addEventListener('click', () => {
-  saveActiveChat();
-  activeChatId = createChatId();
-  conversation = [];
-  chatThread.innerHTML = '';
-  remedies.hidden = true;
-  emergencyBanner.hidden = true;
-  replyAudio.pause();
-  replyAudio.removeAttribute('src');
-  replyAudio.hidden = true;
-  resultSection.hidden = true;
-  welcome.hidden = false;
-  composerLabel.textContent = 'What would you like help with?';
-  messageInput.placeholder = 'Message SwasthAI...';
-  sendLabel.textContent = 'Send message';
-  messageInput.focus();
-  window.scrollTo({ top: 0, behavior: 'smooth' });
-  renderChatList();
+function resetView() {
+  lastResult=null; remedies.hidden=true; emergencyBanner.hidden=true;
+  replyAudio.pause(); replyAudio.removeAttribute('src'); replyAudio.hidden=true;
+  window.speechSynthesis?.cancel(); clearError(); renderConversation(); renderChatList();
+}
+$('#new-question').addEventListener('click',() => {
+  if(busy || recording) return;
+  activeChatId=createChatId(); conversation=[]; messageInput.value='';
+  resetView(); resizeComposer(); messageInput.focus();
 });
-
-renderConversation();
-renderChatList();
-
-chatList.addEventListener('click', (event) => {
-  const chatButton = event.target.closest('[data-chat-id]');
-  if (chatButton) openChat(chatButton.dataset.chatId);
+chatList.addEventListener('click',e => {
+  if(busy || recording) return;
+  const chat=chats.find(c => c.id === e.target.closest('[data-chat-id]')?.dataset.chatId);
+  if(!chat) return;
+  activeChatId=chat.id; conversation=chat.messages; resetView();
 });
-
-setInterval(() => {
-  if (recorder && recorder.state !== 'recording') {
-    recordButton.classList.remove('is-recording');
-    recordButton.setAttribute('aria-pressed', 'false');
-    recordLabel.textContent = 'Press to speak';
-  }
-}, 250);
+languageSelect.addEventListener('change',() => {
+  locale=languageSelect.value;
+  try { localStorage.setItem('swasthai-language',locale); } catch (_) {}
+  applyLanguage();
+});
+renderConversation(); renderChatList(); updateControls();

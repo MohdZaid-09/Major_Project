@@ -7,8 +7,6 @@ Usage:
 """
 import os
 import re
-import chromadb
-from chromadb.utils import embedding_functions
 
 KB_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "knowledge_base")
 CHROMA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "chroma_store")
@@ -32,21 +30,29 @@ def chunk_markdown_file(filepath: str) -> list[dict]:
     condition_match = re.search(r"^#\s+(.+)$", text, re.MULTILINE)
     condition = condition_match.group(1).strip() if condition_match else os.path.basename(filepath)
 
+    source_match = re.search(r"^Source:\s*(https://\S+)", text, re.MULTILINE)
+    reviewed_match = re.search(r"^Reviewed-on:\s*(\S+)", text, re.MULTILINE)
     sections = re.split(r"^##\s+(.+)$", text, flags=re.MULTILINE)
     # sections[0] is anything before the first ##; skip it (just the H1 title)
     chunks = []
     for i in range(1, len(sections), 2):
         system_name = sections[i].strip()
         content = sections[i + 1].strip()
+        section_source = re.search(r"^Source:\s*(https://\S+)", content, re.MULTILINE) or source_match
         chunks.append({
             "condition": condition,
             "system": system_name,
             "content": content,
+            "source_url": section_source.group(1) if section_source else "",
+            "reviewed_on": reviewed_match.group(1) if reviewed_match else "",
+
         })
     return chunks
 
 
 def build_index():
+    import chromadb
+    from chromadb.utils import embedding_functions
     os.makedirs(CHROMA_DIR, exist_ok=True)
     client = chromadb.PersistentClient(path=CHROMA_DIR)
 
@@ -80,6 +86,8 @@ def build_index():
                 "condition": chunk["condition"],
                 "system": chunk["system"],
                 "source_file": filename,
+                "source_url": chunk["source_url"],
+                "reviewed_on": chunk["reviewed_on"],
             })
             ids.append(f"chunk_{doc_id}")
             doc_id += 1
